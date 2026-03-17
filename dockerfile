@@ -1,6 +1,6 @@
-FROM openjdk:17-jdk-slim
+FROM openjdk:21-ea
 WORKDIR /usrapp/bin
-ENV PORT=8080
+ENV PORT 6000
 
 COPY SpringBoot/target/classes /usrapp/bin/classes
 COPY SpringBoot/target/dependency /usrapp/bin/dependency
