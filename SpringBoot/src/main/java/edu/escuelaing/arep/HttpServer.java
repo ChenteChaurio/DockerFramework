@@ -14,6 +14,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.net.SocketException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -21,8 +22,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class HttpServer {
-    static Map<String, WebMethod> endPoints = new HashMap<>();
-    static String staticFilesPath = "";
+    static Map<String, WebMethod> endPoints = new ConcurrentHashMap<>();
+    static volatile String staticFilesPath = "";
 
     // Keep request handling fast; enable only when debugging locally.
     private static final boolean DEBUG_LOG = false;
@@ -30,6 +31,7 @@ public class HttpServer {
     private static final int DEFAULT_PORT = 8080;
     private static final int DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5;
     private static final AtomicBoolean running = new AtomicBoolean(false);
+    private static final AtomicBoolean shutdownHookRegistered = new AtomicBoolean(false);
     private static volatile ServerSocket serverSocket;
     private static volatile ExecutorService workerPool;
 
@@ -54,7 +56,8 @@ public class HttpServer {
     }
 
     /**
-     * Stops the server gracefully: stops accepting new connections, closes the server socket and
+     * Stops the server gracefully: stops accepting new connections, closes the
+     * server socket and
      * waits for in-flight requests to finish.
      */
     public static void stop() {
@@ -84,16 +87,17 @@ public class HttpServer {
                 Thread.currentThread().interrupt();
             }
         }
+
+        workerPool = null;
+        serverSocket = null;
         System.out.println("Server stopped.");
     }
 
     private static void startServer(int port) throws IOException {
-        if (running.get()) {
+        if (!running.compareAndSet(false, true)) {
             System.out.println("Server is already running.");
             return;
         }
-
-        running.set(true);
         serverSocket = new ServerSocket(port);
 
         int nThreads = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
@@ -108,10 +112,12 @@ public class HttpServer {
             }
         });
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // must be safe to call multiple times
-            stop();
-        }, "httpserver-shutdown-hook"));
+        if (shutdownHookRegistered.compareAndSet(false, true)) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                // must be safe to call multiple times
+                stop();
+            }, "httpserver-shutdown-hook"));
+        }
 
         System.out.println("HTTP server listening on port " + port + " with " + nThreads + " workers");
 

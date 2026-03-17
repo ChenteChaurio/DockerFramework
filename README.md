@@ -1,14 +1,15 @@
-# MicroSpringBoot - IoC Web Framework in Java (Concurrent + Graceful Shutdown)
+# MicroSpringBoot - IoC Web Framework in Java
 
-Lightweight HTTP framework built from scratch in Java 17, inspired by Spring Boot.
+A lightweight IoC (Inversion of Control) web framework built from scratch in Java, inspired by Spring Boot. It serves static files (HTML, CSS, JS, PNG, JPG) and supports POJO-based REST controllers through Java Reflection.
 
-### What it does
+## Update for Current Delivery (Concurrency + Graceful Shutdown)
 
-- Serves **static files** (HTML/CSS/JS/images) from `src/main/resources/webroot`.
-- Supports **lambda endpoints**: `HttpServer.get("/path", (req,res) -> ...)`.
-- Supports **annotation-based controllers** (`@RestController`, `@GetMapping`, `@RequestParam`) discovered at runtime.
-- Handles **concurrent requests** using a fixed thread pool.
-- Supports **graceful shutdown** using a JVM **Shutdown Hook** (`Runtime.getRuntime().addShutdownHook(...)`).
+The framework was improved to support concurrent requests and graceful shutdown without using Spring.
+
+- Concurrency is handled with a fixed worker pool (`ExecutorService`) that processes clients in parallel.
+- Shared server state uses thread-safe structures (`ConcurrentHashMap`, `AtomicBoolean`) to avoid race conditions.
+- Graceful shutdown is implemented with a JVM shutdown hook (`Runtime.getRuntime().addShutdownHook(...)`) that invokes `HttpServer.stop()`.
+- On shutdown, the server stops accepting new connections, closes `ServerSocket`, and waits for in-flight tasks to finish before forcing termination.
 
 ## Architecture
 
@@ -69,10 +70,23 @@ Controllers
 | `@GetMapping`      | Annotation to map a URL path to a method                                               |
 | `@RequestParam`    | Annotation to extract and default query parameters                                     |
 
+### Concurrency Design
+
+- **Connection acceptance:** main server loop accepts sockets while server state is `running`.
+- **Task dispatch:** each accepted socket is delegated to the worker pool (`workerPool.execute(...)`).
+- **Endpoint registry:** routes are stored in a concurrent map so reads/writes are safe under load.
+
+### Graceful Shutdown Design
+
+- **Trigger:** JVM shutdown signal (e.g., `Ctrl + C`, container stop) activates the shutdown hook.
+- **Sequence:** set `running=false` → close `ServerSocket` → `shutdown()` worker pool → wait with timeout → `shutdownNow()` only if needed.
+- **Result:** active requests can complete within the timeout, reducing abrupt termination.
+
 ## Prerequisites
 
 - Java JDK 17+
 - Maven 3.x
+- Docker Desktop or Docker Engine
 - `JAVA_HOME` must point to a JDK (not a JRE)
 
 To set `JAVA_HOME` temporarily in PowerShell:
@@ -83,19 +97,19 @@ $env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
 
 ## Build and Run
 
-> Note: in this VS Code environment Maven may not be available in PATH. On your machine/CI, ensure `mvn` works.
-
 ### Build
 
-```powershell
+```bash
 cd SpringBoot
-mvn clean test package
+mvn clean compile
 ```
+
+The project is configured with the Maven Dependency Plugin so that `mvn compile` also copies runtime dependencies into `target/dependency/`. This is required to run the app with external dependencies and to build the Docker image from the compiled artifacts.
 
 ### Run the lambda-style server
 
-```powershell
-java -cp target/classes edu.escuelaing.arep.App
+```bash
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.App
 ```
 
 Then open: [http://localhost:8080/index.html](http://localhost:8080/index.html)
@@ -103,7 +117,7 @@ Then open: [http://localhost:8080/index.html](http://localhost:8080/index.html)
 ### Run the reflection-based IoC server
 
 ```bash
-java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.MicroSpringBoot2 \
   edu.escuelaing.arep.GreetingController \
   /greeting?name=Juan
 ```
@@ -120,27 +134,26 @@ java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
 ## Available Endpoints (MicroSpringBoot2 + HelloController)
 
 ```bash
-java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.MicroSpringBoot2 \
   edu.escuelaing.arep.HelloController /
 # → Greetings from Spring Boot!
 
-java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.MicroSpringBoot2 \
   edu.escuelaing.arep.HelloController /hello
 # → Hello World
 
-java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.MicroSpringBoot2 \
   edu.escuelaing.arep.GreetingController /greeting?name=Juan
 # → Hola Juan
 
-java -cp target/classes edu.escuelaing.arep.MicroSpringBoot2 \
+java -cp "target/classes;target/dependency/*" edu.escuelaing.arep.MicroSpringBoot2 \
   edu.escuelaing.arep.GreetingController /greeting
 # → Hola World  (uses defaultValue)
 ```
 
 ## Tests
 
-```powershell
-cd SpringBoot
+```bash
 mvn test
 ```
 
@@ -156,99 +169,75 @@ Tests cover:
 ### Test evidence
 
 ```
-[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0
 ```
 
-This project also includes integration-style tests in `AppTest` that:
+Additionally, framework-level behavior to validate for this delivery:
 
-- Send multiple HTTP requests concurrently to the server (`/slow`) and assert the total wall time is less than sequential time.
-- Call `HttpServer.stop()` and assert the port is released.
-
-> Update the block above with a screenshot or console output from your `mvn test` run.
-
-## Concurrency design
-
-`HttpServer` now:
-
-- Accepts connections in the main accept loop.
-- Dispatches each accepted socket to a **fixed** `ExecutorService`.
-- Keeps server state with an `AtomicBoolean running`.
-
-This allows multiple requests to be processed in parallel, bounded by the size of the worker pool.
-
-## Graceful shutdown design
-
-`HttpServer` registers a shutdown hook:
-
-- When the JVM receives SIGTERM (Docker stop / EC2 service stop), the hook triggers `HttpServer.stop()`.
-- `stop()` flips the `running` flag, closes the `ServerSocket`, and calls `shutdown()` + `awaitTermination()` on the worker pool.
-
-This matches the rubric requirement: terminate the loop condition and shutdown using a Runtime Hook running in its own thread.
-
-Reference: https://www.baeldung.com/jvm-shutdown-hooks
-
-## Docker 🐳
-
-There’s a `Dockerfile` in `SpringBoot/`.
-
-### Build image
-
-```powershell
-cd SpringBoot
-mvn clean test package
-docker build -t microspringboot:latest .
-```
-
-### Run container
-
-```powershell
-docker run --rm -p 8080:8080 microspringboot:latest
-```
-
-Open:
-
-- http://localhost:8080/index.html
-- http://localhost:8080/App/hello?name=AREP
-
-### Evidence (add screenshots)
-
-Add screenshots here:
-
-- Docker image built successfully
-- Container running (`docker ps`)
-- Browser hitting the endpoints
+- concurrent request handling with multiple simultaneous clients
+- graceful shutdown behavior when stopping the JVM/container
 
 ## AWS Deployment
 
-### Summary
+Two deployment approaches were validated during the delivery: direct execution on the EC2 instance and containerized deployment with Docker.
 
-Deployed as a Docker container on an EC2 instance. The server shuts down gracefully when the container is stopped.
+### Direct execution on EC2
 
-### Steps (example)
+Steps followed:
 
-1. Create an EC2 instance (Ubuntu) and open inbound port **8080** in the Security Group.
-2. Install Docker in EC2.
-3. Copy the project or just the built image instructions.
-4. Build and run:
+1. Compile the project in `SpringBoot/`: `mvn clean compile`
+2. Open the EC2 security group inbound rule for port `8080`
+3. Connect to the instance through SSH
+4. Run the application with compiled classes and copied dependencies:
 
 ```bash
-docker build -t microspringboot:latest .
-docker run -d --name microspringboot -p 8080:8080 microspringboot:latest
+java -cp "SpringBoot/target/classes:SpringBoot/target/dependency/*" edu.escuelaing.arep.App
 ```
 
-5. Test from your local machine:
+### EC2 Instance (AWS Console)
 
-- `http://<EC2_PUBLIC_IP>:8080/index.html`
-- `http://<EC2_PUBLIC_IP>:8080/App/pi`
+![EC2 instance on AWS](Assets/InstanceAWS.png)
 
-### Evidence (required by rubric)
+### SSH Connection to the server
 
-Add images to the repo (for example in `docs/img/`):
+![SSH connection](Assets/ConecctionSSH.png)
 
-- EC2 instance details (public IP)
-- Security group showing port 8080
-- `docker ps` showing the container
-- Browser proofs calling endpoints
+### Application running in browser
+
+![Page running on EC2](Assets/PageInstance.png)
+
+### Endpoints working on the deployed instance
+
+![Endpoints tested on EC2](Assets/TestInstance.png)
+
+## Docker Deployment
+
+After compiling the project, the container image was built from the repository root using the compiled artifacts in `SpringBoot/target/`.
+
+### Build and publish the image
+
+```bash
+docker build --tag chentechaurio/dockerspringconcurrent:latest .
+docker push chentechaurio/dockerspringconcurrent:latest
+```
+
+### Run the container on the EC2 instance
+
+```bash
+docker run -d -p 8080:8080 --name dockerspringconcurrent chentechaurio/dockerspringconcurrent:latest
+```
+
+### Docker repository published in Docker Hub
+
+![Docker Hub repository](Assets/DockerHub.png)
+
+### Container running on the EC2 instance
+
+![Docker container running in instance bash](Assets/DockerRunInInstanceBash.png)
+
+### Application running from the deployed container
+
+![Application running from Docker container](Assets/FrameworkRunInDockerPage.png)
 
 ## Project Structure
 
@@ -271,15 +260,3 @@ src/
 └── test/java/edu/escuelaing/arep/
     └── AppTest.java              ← Unit tests
 ```
-
-## Deliverables checklist (rubric)
-
-- [x] GitHub-ready Maven project structure
-- [x] `pom.xml`
-- [x] `.gitignore` (excludes `target/`)
-- [x] Concurrent request handling (thread pool)
-- [x] Graceful shutdown (JVM shutdown hook)
-- [x] Automated tests (`mvn test`)
-- [x] Dockerfile + instructions
-- [ ] Screenshots of Docker + AWS deployment (add in `docs/img/`)
-- [ ] Video showing deployments working (record and add link here)
